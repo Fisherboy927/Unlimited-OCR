@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default=default_model_name(), help="Model name or local model path.")
     parser.add_argument("--dpi", type=int, default=400, help="DPI used when converting PDF pages.")
-    parser.add_argument("--max-length", type=int, default=8192, help="Maximum generation length.")
+    parser.add_argument("--max-length", type=int, default=32768, help="Maximum generation length.")
     parser.add_argument(
         "--temperature",
         type=float,
@@ -211,11 +211,11 @@ def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: ar
         image_file=str(image_path),
         output_path=str(output_dir),
         base_size=1024,
-        image_size=1024,
-        crop_mode=False,
+        image_size=640,
+        crop_mode=True,
         max_length=args.max_length,
-        no_repeat_ngram_size=20,
-        ngram_window=1024,
+        no_repeat_ngram_size=35,
+        ngram_window=128,
         temperature=args.temperature,
         save_results=True,
     )
