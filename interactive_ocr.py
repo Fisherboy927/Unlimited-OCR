@@ -19,7 +19,6 @@ DEFAULT_REMOTE_MODEL_NAME = "baidu/Unlimited-OCR"
 DEFAULT_LOCAL_MODEL_PATH = Path(__file__).resolve().parent / "models" / "Unlimited-OCR"
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PDF_SUFFIX = ".pdf"
-OUTPUT_FILES = {"result.md", "result_with_boxes.jpg"}
 DEFAULT_PROMPT = (
     "<image>OCR this delivery document exactly. Preserve table structure. "
     "Only output text visibly present in the image. Do not infer, continue, "
@@ -231,7 +230,6 @@ def process_file(model, tokenizer, input_path: Path, output_dir: Path, args: arg
     else:
         markdown_path = run_image_ocr(model, tokenizer, input_path, output_dir, args)
 
-    clean_output_dir(output_dir, keep=OUTPUT_FILES)
     return markdown_path
 
 
