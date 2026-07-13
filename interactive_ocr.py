@@ -193,7 +193,6 @@ def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: ar
         max_length=args.max_length,
         no_repeat_ngram_size=15,
         ngram_window=256,
-        repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
         temperature=args.temperature,
         save_results=True,
     )
