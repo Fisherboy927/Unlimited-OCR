@@ -20,10 +20,7 @@ DEFAULT_LOCAL_MODEL_PATH = Path(__file__).resolve().parent / "models" / "Unlimit
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PDF_SUFFIX = ".pdf"
 DEFAULT_PROMPT = (
-    "<image>OCR this delivery document exactly. Preserve table structure. "
-    "Only output text visibly present in the image. Do not infer, continue, "
-    "or repeat table rows. If a cell is unclear, leave it blank. Stop after "
-    "the last visible content on the page."
+    "<image>Image parsing"
 )
 
 
@@ -50,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where per-file result.md and result_with_boxes.jpg outputs will be written.",
     )
     parser.add_argument("--model", default=default_model_name(), help="Model name or local model path.")
-    parser.add_argument("--dpi", type=int, default=400, help="DPI used when converting PDF pages.")
+    parser.add_argument("--dpi", type=int, default=300, help="DPI used when converting PDF pages.")
     parser.add_argument("--max-length", type=int, default=32768, help="Maximum generation length.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="OCR prompt. Must include one <image> token.")
     parser.add_argument(
