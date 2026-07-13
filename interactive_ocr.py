@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -22,22 +20,7 @@ DEFAULT_LOCAL_MODEL_PATH = Path(__file__).resolve().parent / "models" / "Unlimit
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PDF_SUFFIX = ".pdf"
 DEFAULT_PROMPT = (
-    "<image>Image parsing"
-)
-
-# Noise-only trailing hallucination detection.
-# Conservative by design: never treat config-table / CPU / quantity rows as hallucination.
-_BROKEN_DET_RE = re.compile(r"<\|det\|>\s*aside_text\b", re.IGNORECASE)
-_NON_TEXT_RE = re.compile(r"\[Non-Text\]", re.IGNORECASE)
-_DATE_GARBAGE_RE = re.compile(r"^\(?\d*\)?\s*2017年1月1日\s*$")
-# Real receipt/table content must never be classified as noise.
-_PROTECTED_CONTENT_RE = re.compile(
-    r"(?:"
-    r"<t[rdh]\b|<table\b|"
-    r"海光|CPU|数量|PCS|产品代码|产品编码|配置清单|整机清单|货物明细|"
-    r"签收|收货|表格编号|UN-[A-Z0-9-]+|0231[A-Z0-9]+"
-    r")",
-    re.IGNORECASE,
+    "<image>document parsing"
 )
 
 
@@ -48,220 +31,6 @@ def default_model_name() -> str:
     if DEFAULT_LOCAL_MODEL_PATH.exists():
         return str(DEFAULT_LOCAL_MODEL_PATH)
     return DEFAULT_REMOTE_MODEL_NAME
-
-
-def _is_protected_content(text: str) -> bool:
-    """True when the line looks like real receipt/table content (never trim/stop on it)."""
-    return bool(_PROTECTED_CONTENT_RE.search(text))
-
-
-def _is_noise_line(line: str) -> bool:
-    """Classify a single line as trailing OCR noise (Non-Text / broken aside / date junk)."""
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if _is_protected_content(stripped):
-        return False
-    if _NON_TEXT_RE.search(stripped):
-        # Entirely / mostly Non-Text placeholders, or broken det wrapping them.
-        remainder = _NON_TEXT_RE.sub("", stripped)
-        remainder = re.sub(r"<\|/?det\|>", "", remainder, flags=re.IGNORECASE)
-        remainder = re.sub(r"aside_text\b", "", remainder, flags=re.IGNORECASE)
-        remainder = re.sub(r"[\[\](),.\d\s]+", "", remainder)
-        return len(remainder) <= 8
-    if _DATE_GARBAGE_RE.match(stripped):
-        return True
-    if _BROKEN_DET_RE.match(stripped) and "<|/det|>" not in stripped:
-        return True
-    return False
-
-
-def _trailing_noise_run_start(lines: list[str]) -> int | None:
-    """Return the line index where a trailing all-noise run begins, or None."""
-    index = len(lines) - 1
-    # Ignore a single final empty line when locating the run.
-    if index >= 0 and not lines[index].strip():
-        index -= 1
-
-    run_end = index
-    while index >= 0:
-        stripped = lines[index].strip()
-        if not stripped:
-            index -= 1
-            continue
-        if not _is_noise_line(lines[index]):
-            break
-        index -= 1
-
-    run_start = index + 1
-    # Skip leading blanks inside the candidate run so counting is on noise lines only.
-    while run_start <= run_end and not lines[run_start].strip():
-        run_start += 1
-
-    noise_count = sum(1 for line in lines[run_start : run_end + 1] if line.strip())
-    if noise_count <= 0:
-        return None
-    return run_start if noise_count else None
-
-
-def trailing_hallucination_span(text: str, min_repeats: int = 4) -> tuple[int, int] | None:
-    """If a trailing noise loop is found, return (cut_from, end) covering the whole noise tail.
-
-    Only triggers on noise (Non-Text / broken aside_text / known junk dates).
-    Does not use digit-normalized structural matching, so similar config-table rows
-    with different CPU/quantity fields are never treated as hallucination.
-    """
-    if min_repeats < 2 or not text:
-        return None
-
-    lines = text.splitlines(keepends=True)
-    if not lines:
-        return None
-
-    run_start = _trailing_noise_run_start(lines)
-    if run_start is None:
-        return None
-
-    noise_count = sum(1 for line in lines[run_start:] if line.strip() and _is_noise_line(line))
-    if noise_count < min_repeats:
-        return None
-
-    # Extra safety: never cut if the proposed cut point sits inside protected table markup.
-    prefix = "".join(lines[:run_start])
-    if prefix.rstrip().endswith(("<tr>", "<td>", "<th>", "<table>")):
-        return None
-
-    cut_from = sum(len(line) for line in lines[:run_start])
-    return cut_from, len(text)
-
-
-def has_trailing_hallucination(text: str, min_repeats: int = 4) -> bool:
-    return trailing_hallucination_span(text, min_repeats=min_repeats) is not None
-
-
-def trim_trailing_hallucination(text: str, min_repeats: int = 4) -> str:
-    """Remove the entire trailing noise run; leave all prior receipt/table content intact."""
-    span = trailing_hallucination_span(text, min_repeats=min_repeats)
-    if span is None:
-        return text
-    cut_from, _ = span
-    trimmed = text[:cut_from].rstrip()
-    if not trimmed:
-        return text
-    return trimmed + ("\n" if text.endswith("\n") else "")
-
-
-def create_trailing_hallucination_stopping_criteria(
-    tokenizer,
-    prompt_length: int,
-    min_repeats: int = 4,
-    check_every: int = 16,
-):
-    """Build a transformers StoppingCriteria that stops on trailing noise loops only."""
-    import torch
-    from transformers import StoppingCriteria
-
-    class TrailingHallucinationStoppingCriteria(StoppingCriteria):
-        def __init__(self) -> None:
-            self.tokenizer = tokenizer
-            self.prompt_length = prompt_length
-            self.min_repeats = min_repeats
-            self.check_every = max(1, check_every)
-            self.steps = 0
-            self.triggered = False
-
-        def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-            self.steps += 1
-            batch_size = input_ids.shape[0]
-            device = input_ids.device
-            should_stop = torch.zeros(batch_size, dtype=torch.bool, device=device)
-
-            if self.steps % self.check_every != 0:
-                return should_stop
-
-            for batch_index in range(batch_size):
-                generated = input_ids[batch_index, self.prompt_length :]
-                if generated.numel() == 0:
-                    continue
-                text = self.tokenizer.decode(generated, skip_special_tokens=False)
-                if has_trailing_hallucination(text, min_repeats=self.min_repeats):
-                    should_stop[batch_index] = True
-                    self.triggered = True
-
-            if bool(should_stop.any()):
-                print(
-                    f"\n[early-stop] Trailing noise hallucination detected "
-                    f"(≥{self.min_repeats} Non-Text/aside junk lines); stopping generation.",
-                    flush=True,
-                )
-            return should_stop
-
-    return TrailingHallucinationStoppingCriteria()
-
-
-@contextmanager
-def hallucination_early_stop(
-    model,
-    tokenizer,
-    enabled: bool = True,
-    min_repeats: int = 4,
-    check_every: int = 16,
-):
-    """Inject streaming early-stop into model.generate for the duration of OCR."""
-    if not enabled:
-        yield None
-        return
-
-    from transformers import StoppingCriteriaList
-
-    original_generate = model.generate
-    criteria_holder: dict[str, object] = {"criteria": None}
-
-    def generate_with_early_stop(*args, **kwargs):
-        input_ids = kwargs.get("input_ids")
-        if input_ids is None and args:
-            input_ids = args[0]
-        if input_ids is None:
-            return original_generate(*args, **kwargs)
-
-        prompt_length = int(input_ids.shape[-1])
-        stop_criteria = create_trailing_hallucination_stopping_criteria(
-            tokenizer,
-            prompt_length=prompt_length,
-            min_repeats=min_repeats,
-            check_every=check_every,
-        )
-        criteria_holder["criteria"] = stop_criteria
-
-        existing = kwargs.get("stopping_criteria")
-        if existing is None:
-            kwargs["stopping_criteria"] = StoppingCriteriaList([stop_criteria])
-        elif isinstance(existing, StoppingCriteriaList):
-            existing.append(stop_criteria)
-            kwargs["stopping_criteria"] = existing
-        else:
-            kwargs["stopping_criteria"] = StoppingCriteriaList([*list(existing), stop_criteria])
-
-        return original_generate(*args, **kwargs)
-
-    model.generate = generate_with_early_stop
-    try:
-        yield criteria_holder
-    finally:
-        model.generate = original_generate
-
-
-def apply_hallucination_trim(markdown_path: Path, min_repeats: int = 4) -> bool:
-    """Trim leftover trailing noise from result.md after early-stop or full decode."""
-    if not markdown_path.exists():
-        return False
-    original = markdown_path.read_text(encoding="utf-8")
-    trimmed = trim_trailing_hallucination(original, min_repeats=min_repeats)
-    if trimmed == original:
-        return False
-    markdown_path.write_text(trimmed, encoding="utf-8")
-    print(f"[early-stop] Trimmed trailing hallucination from {markdown_path}", flush=True)
-    return True
 
 
 # Parse command-line options while keeping interactive prompts as the default flow.
@@ -278,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where per-file result.md and result_with_boxes.jpg outputs will be written.",
     )
     parser.add_argument("--model", default=default_model_name(), help="Model name or local model path.")
-    parser.add_argument("--dpi", type=int, default=300, help="DPI used when converting PDF pages.")
+    parser.add_argument("--dpi", type=int, default=400, help="DPI used when converting PDF pages.")
     parser.add_argument("--max-length", type=int, default=32768, help="Maximum generation length.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="OCR prompt. Must include one <image> token.")
     parser.add_argument(
@@ -286,27 +55,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Sampling temperature. 0 uses deterministic decoding.",
-    )
-    parser.add_argument(
-        "--no-early-stop",
-        action="store_true",
-        help="Disable streaming early-stop for trailing Non-Text/aside noise loops.",
-    )
-    parser.add_argument(
-        "--hallucination-repeats",
-        type=int,
-        default=4,
-        help=(
-            "Stop after this many consecutive trailing noise lines "
-            "([Non-Text] / broken aside_text / junk dates). "
-            "Does not match config-table rows. Default: 4."
-        ),
-    )
-    parser.add_argument(
-        "--hallucination-check-every",
-        type=int,
-        default=16,
-        help="Check for trailing noise hallucination every N newly generated tokens. Default: 16.",
     )
     return parser.parse_args()
 
@@ -431,35 +179,21 @@ def write_fallback_markdown(output_dir: Path, outputs: str | None) -> Path:
 
 # Run the single-image inference path recommended by the Unlimited-OCR README.
 def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: argparse.Namespace) -> Path:
-    min_repeats = max(2, args.hallucination_repeats)
-    with hallucination_early_stop(
-        model,
+    outputs = model.infer(
         tokenizer,
-        enabled=not args.no_early_stop,
-        min_repeats=min_repeats,
-        check_every=args.hallucination_check_every,
-    ):
-        outputs = model.infer(
-            tokenizer,
-            prompt=args.prompt,
-            image_file=str(image_path),
-            output_path=str(output_dir),
-            base_size=1024,
-            image_size=640,
-            crop_mode=True,
-            max_length=args.max_length,
-            no_repeat_ngram_size=35,
-            ngram_window=128,
-            temperature=args.temperature,
-            save_results=True,
-        )
-
-    if isinstance(outputs, str):
-        outputs = trim_trailing_hallucination(outputs, min_repeats=min_repeats)
-
-    markdown_path = write_fallback_markdown(output_dir, outputs)
-    apply_hallucination_trim(markdown_path, min_repeats=min_repeats)
-    return markdown_path
+        prompt=args.prompt,
+        image_file=str(image_path),
+        output_path=str(output_dir),
+        base_size=1024,
+        image_size=640,
+        crop_mode=True,
+        max_length=args.max_length,
+        no_repeat_ngram_size=35,
+        ngram_window=128,
+        temperature=args.temperature,
+        save_results=True,
+    )
+    return write_fallback_markdown(output_dir, outputs)
 
 
 # Convert one PDF to images and parse each page with single-image OCR (crop mode).
