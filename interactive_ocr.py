@@ -200,26 +200,44 @@ def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: ar
     return write_fallback_markdown(output_dir, outputs)
 
 
-# Convert one PDF to images and parse all pages through the model's multi-page path.
+# Convert one PDF to images and parse each page with single-image OCR (crop mode).
 def run_pdf_ocr(model, tokenizer, pdf_path: Path, output_dir: Path, args: argparse.Namespace) -> Path:
     with tempfile.TemporaryDirectory(prefix="unlimited_ocr_pdf_") as temp_root:
-        image_paths = pdf_to_images(pdf_path, Path(temp_root) / "pages", args.dpi)
-        print(f"Parsing PDF with {len(image_paths)} page(s)")
-        outputs, _ = model.infer_multi(
-            tokenizer,
-            prompt=args.prompt,
-            image_files=image_paths,
-            output_path=str(output_dir),
-            image_size=1024,
-            max_length=args.max_length,
-            no_repeat_ngram_size=35,
-            ngram_window=1024,
-            repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
-            temperature=args.temperature,
-            save_results=True,
-        )
+        temp_root_path = Path(temp_root)
+        image_paths = pdf_to_images(pdf_path, temp_root_path / "pages", args.dpi)
+        print(f"Parsing PDF with {len(image_paths)} page(s) via single-image mode")
 
-    return write_fallback_markdown(output_dir, outputs)
+        page_markdowns: list[str] = []
+        images_dir = output_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        for page_index, image_path in enumerate(image_paths):
+            page_dir = temp_root_path / f"out_{page_index}"
+            page_dir.mkdir()
+            print(f"  page {page_index + 1}/{len(image_paths)}")
+            run_image_ocr(model, tokenizer, Path(image_path), page_dir, args)
+
+            markdown = (page_dir / "result.md").read_text(encoding="utf-8")
+            page_images = page_dir / "images"
+            if page_images.exists():
+                for image_file in sorted(page_images.iterdir()):
+                    if not image_file.is_file():
+                        continue
+                    dest_name = f"page_{page_index}_{image_file.name}"
+                    shutil.copy2(image_file, images_dir / dest_name)
+                    markdown = markdown.replace(
+                        f"![](images/{image_file.name}",
+                        f"![](images/{dest_name}",
+                    )
+            page_markdowns.append(markdown.strip())
+
+            boxes = page_dir / "result_with_boxes.jpg"
+            if boxes.exists():
+                shutil.copy2(boxes, output_dir / f"result_with_boxes_{page_index}.jpg")
+
+    markdown_path = output_dir / "result.md"
+    markdown_path.write_text("<PAGE>\n" + "\n<PAGE>\n".join(page_markdowns) + "\n", encoding="utf-8")
+    return markdown_path
 
 
 # Process one supported file and return the path to its Markdown output.
