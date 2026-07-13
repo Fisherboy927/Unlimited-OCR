@@ -191,7 +191,7 @@ def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: ar
         image_size=640,
         crop_mode=True,
         max_length=args.max_length,
-        no_repeat_ngram_size=5,
+        no_repeat_ngram_size=10,
         ngram_window=256,
         repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
         temperature=args.temperature,
@@ -212,7 +212,7 @@ def run_pdf_ocr(model, tokenizer, pdf_path: Path, output_dir: Path, args: argpar
             output_path=str(output_dir),
             image_size=1024,
             max_length=args.max_length,
-            no_repeat_ngram_size=5,
+            no_repeat_ngram_size=35,
             ngram_window=1024,
             repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
             temperature=args.temperature,
