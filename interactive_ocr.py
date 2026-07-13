@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where per-file result.md and result_with_boxes.jpg outputs will be written.",
     )
     parser.add_argument("--model", default=default_model_name(), help="Model name or local model path.")
-    parser.add_argument("--dpi", type=int, default=300, help="DPI used when converting PDF pages.")
+    parser.add_argument("--dpi", type=int, default=400, help="DPI used when converting PDF pages.")
     parser.add_argument("--max-length", type=int, default=32768, help="Maximum generation length.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="OCR prompt. Must include one <image> token.")
     parser.add_argument(
@@ -191,8 +191,9 @@ def run_image_ocr(model, tokenizer, image_path: Path, output_dir: Path, args: ar
         image_size=640,
         crop_mode=True,
         max_length=args.max_length,
-        no_repeat_ngram_size=35,
-        ngram_window=128,
+        no_repeat_ngram_size=5,
+        ngram_window=256,
+        repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
         temperature=args.temperature,
         save_results=True,
     )
@@ -211,8 +212,9 @@ def run_pdf_ocr(model, tokenizer, pdf_path: Path, output_dir: Path, args: argpar
             output_path=str(output_dir),
             image_size=1024,
             max_length=args.max_length,
-            no_repeat_ngram_size=35,
+            no_repeat_ngram_size=5,
             ngram_window=1024,
+            repetition_penalty=1.05,   # soft global penalty; low enough not to distort content probabilities
             temperature=args.temperature,
             save_results=True,
         )
